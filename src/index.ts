@@ -14,6 +14,59 @@ const CHAIN = process.env.ENVIRONMENT
 const TOKEN = 'credit';
 const USER_AGENT = "crossmint-checkout/1.0";
 
+// --- Supported Chains and Token Matrix ---
+type SupportedChain =
+  | 'ethereum'
+  | 'ethereum-sepolia'
+  | 'polygon'
+  | 'polygon-amoy'
+  | 'base'
+  | 'base-sepolia';
+type SupportedToken = 'usdc' | 'usdxm' | 'credit';
+
+const SUPPORTED_CHAINS: Record<SupportedChain, SupportedToken[]> = {
+  ethereum: ['usdc'],
+  'ethereum-sepolia': ['usdc', 'usdxm', 'credit'],
+  polygon: ['usdc'],
+  'polygon-amoy': ['usdc', 'usdxm'],
+  base: ['usdc'],
+  'base-sepolia': ['usdc', 'usdxm'],
+};
+
+const SUPPORTED_PAYMENT_METHODS = ['credit', 'usdc', 'usdxm'];
+
+function resolvePaymentConfig() {
+  const userToken = (process.env.CHECKOUT_PAYMENT_METHOD || 'credit').toLowerCase();
+  const userChain = (process.env.CHECKOUT_CHAIN || 'ethereum-sepolia').toLowerCase();
+
+  if (!SUPPORTED_PAYMENT_METHODS.includes(userToken)) {
+    throw new Error(`Unsupported payment method: ${userToken}`);
+  }
+
+  if (userToken === 'credit') {
+    if (userChain !== 'ethereum-sepolia') {
+      throw new Error(`'credit' is only supported on ethereum-sepolia`);
+    }
+    return {
+      token: 'credit',
+      chain: 'ethereum-sepolia',
+    };
+  }
+
+  if (!(userChain in SUPPORTED_CHAINS)) {
+    throw new Error(`Unsupported chain: ${userChain}`);
+  }
+  const supportedTokens = SUPPORTED_CHAINS[userChain as SupportedChain];
+  if (!supportedTokens.includes(userToken as SupportedToken)) {
+    throw new Error(`Token '${userToken}' is not supported on chain '${userChain}'`);
+  }
+
+  return {
+    token: userToken,
+    chain: userChain,
+  };
+}
+
 // Helper function for making Crossmint API requests
 async function makeCrossmintRequest(
   endpoint: string,
@@ -98,8 +151,7 @@ server.tool(
       // Show balance with search results
       try {
         const walletAddress = process.env.AGENT_WALLET_ADDRESS || "";
-        const token = process.env.CHECKOUT_PAYMENT_METHOD || "credit";
-        const chain = process.env.CHECKOUT_CHAIN || CHAIN;
+        const { token, chain } = resolvePaymentConfig();
         const url = `${CROSSMINT_API_BASE}/v1-alpha2/wallets/${walletAddress}/balances?tokens=${token}&chains=${chain}`;
         const headers = { "X-API-KEY": process.env.CROSSMINT_API_KEY || "" };
         const balanceResponse = await fetch(url, { headers });
@@ -108,11 +160,11 @@ server.tool(
         console.error('DEBUG: Raw balance API response:', JSON.stringify(balanceData, null, 2));
         let balance: number | null = null;
         let decimals = 2;
-        const isCreditToken = token.toLowerCase() === 'credit';
+        const isCreditToken = token === 'credit';
         if (Array.isArray(balanceData)) {
           const tokenInfo = balanceData.find((t: any) =>
             (isCreditToken && t.token.toLowerCase() === 'credit') ||
-            (!isCreditToken && t.token.toLowerCase() === token.toLowerCase())
+            (!isCreditToken && t.token.toLowerCase() === token)
           );
           console.error('DEBUG: tokenInfo', tokenInfo);
           if (tokenInfo && tokenInfo.balances && tokenInfo.balances[chain]) {
@@ -122,7 +174,7 @@ server.tool(
             console.error('DEBUG: raw', raw, 'decimals', decimals, 'balance', balance);
           }
         }
-        balanceText = `\nYour CREDIT balance: ${typeof balance === 'number' && !isNaN(balance) ? balance.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: decimals }) : "(Could not fetch balance)"}`;
+        balanceText = `\nYour ${token.toUpperCase()} balance: ${typeof balance === 'number' && !isNaN(balance) ? balance.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: decimals }) : "(Could not fetch balance)"}`;
       } catch (e) {
         balanceText = "\n(Could not fetch balance)";
       }
@@ -171,10 +223,9 @@ server.tool(
   },
   async ({ asin }) => {
     try {
-      // 1. Get user's CREDIT balance
+      // 1. Get user's balance
       const walletAddress = process.env.AGENT_WALLET_ADDRESS || "";
-      const token = process.env.CHECKOUT_PAYMENT_METHOD || "credit";
-      const chain = process.env.CHECKOUT_CHAIN || CHAIN;
+      const { token, chain } = resolvePaymentConfig();
       const url = `${CROSSMINT_API_BASE}/v1-alpha2/wallets/${walletAddress}/balances?tokens=${token}&chains=${chain}`;
       const headers = { "X-API-KEY": process.env.CROSSMINT_API_KEY || "" };
       const balanceResponse = await fetch(url, { headers });
@@ -183,11 +234,11 @@ server.tool(
       console.error('DEBUG: Raw balance API response:', JSON.stringify(balanceData, null, 2));
       let balance: number | null = null;
       let decimals = 2;
-      const isCreditToken = token.toLowerCase() === 'credit';
+      const isCreditToken = token === 'credit';
       if (Array.isArray(balanceData)) {
         const tokenInfo = balanceData.find((t: any) =>
           (isCreditToken && t.token.toLowerCase() === 'credit') ||
-          (!isCreditToken && t.token.toLowerCase() === token.toLowerCase())
+          (!isCreditToken && t.token.toLowerCase() === token)
         );
         console.error('DEBUG: tokenInfo', tokenInfo);
         if (tokenInfo && tokenInfo.balances && tokenInfo.balances[chain]) {
@@ -254,11 +305,12 @@ server.tool(
         }
       }, true);
       // Get price from order quote
-      const itemPrice = parseFloat(orderResponse?.quote?.totalPrice?.amount || "0");
+      const rawAmount = orderResponse?.order?.onChainParameters?.amount || "0";
+      const itemPrice = parseFloat(rawAmount) / 1000000;
       if (parseFloat(typeof balance === 'number' && !isNaN(balance) ? balance.toString() : "0") < itemPrice) {
         return {
           content: [
-            { type: "text", text: `You have ${typeof balance === 'number' && !isNaN(balance) ? balance.toString() : "0"} credits, but this item costs ${itemPrice} credits. Please top up your wallet to proceed.` }
+            { type: "text", text: `You have ${typeof balance === 'number' && !isNaN(balance) ? balance.toString() : "0"} ${token}, but this item costs ${itemPrice} ${token}. Please top up your wallet to proceed.` }
           ]
         };
       }
@@ -279,15 +331,21 @@ server.tool(
         locale: "en-US",
         payment: {
           receiptEmail: shippingInfo.email,
-          method: CHAIN,
-          currency: TOKEN,
+          method: chain,
+          currency: token,
           payerAddress: walletAddress
         },
         externalOrder: orderResponse
       });
+      console.error('DEBUG: Checkout response:', JSON.stringify(checkoutResponse, null, 2));
+      console.error('DEBUG: Order response:', JSON.stringify(orderResponse, null, 2));
       const orderId = checkoutResponse.order?.orderId;
-      const price = checkoutResponse.order?.quote?.totalPrice?.amount;
-      const currency = checkoutResponse.order?.quote?.totalPrice?.currency;
+      const price = itemPrice.toString();
+      const currency = checkoutResponse.order?.quote?.currency || 
+                      checkoutResponse.order?.CHECKOUT?.totalPrice?.currency || 
+                      orderResponse?.quote?.currency ||
+                      orderResponse?.CHECKOUT?.totalPrice?.currency ||
+                      token;
       const serializedTransaction = checkoutResponse.order?.payment?.preparation?.serializedTransaction;
       return {
         content: [
@@ -324,6 +382,7 @@ server.tool(
   async ({ serializedTransaction }) => {
     try {
       const walletAddress = process.env.AGENT_WALLET_ADDRESS || '';
+      const { chain } = resolvePaymentConfig();
       const response = await makeCrossmintRequest(`/2022-06-09/wallets/${walletAddress}`, 'GET');
       if (!response.config?.adminSigner?.locator) {
         throw new Error('Admin signer not found');
@@ -337,7 +396,7 @@ server.tool(
               transaction: serializedTransaction
             }
           ],
-          chain: CHAIN,
+          chain: chain,
           signer: adminSigner
         }
       });
@@ -449,15 +508,63 @@ server.tool(
 // Tool: Get CREDIT Token Balance (uses agent wallet by default)
 server.tool(
   "get-credit-balance",
-  "Get the CREDIT token balance for a wallet (defaults to your agent wallet if not provided)",
+  "Get the token balance for a wallet (defaults to your agent wallet if not provided)",
   {
-    walletAddress: z.string().optional().describe("Wallet address to check balance for (defaults to agent wallet)")
+    walletAddress: z.string().optional().describe("Wallet address to check balance for (defaults to agent wallet)"),
+    token: z.string().optional().describe("Token to check balance for (defaults to CHECKOUT_PAYMENT_METHOD)"),
+    chain: z.string().optional().describe("Chain to check balance on (defaults to CHECKOUT_CHAIN)")
   },
-  async ({ walletAddress }) => {
+  async ({ walletAddress, token: userToken, chain: userChain }) => {
     try {
       const address = walletAddress || process.env.AGENT_WALLET_ADDRESS || "";
-      const token = process.env.CHECKOUT_PAYMENT_METHOD || "credit";
-      const chain = process.env.CHECKOUT_CHAIN || CHAIN;
+      let token: string;
+      let chain: string;
+      // Enforce that if either token or chain is specified, both must be specified
+      if ((userToken && !userChain) || (!userToken && userChain)) {
+        return {
+          content: [
+            { type: "text", text: `If you specify either 'token' or 'chain', you must specify both.` }
+          ]
+        };
+      }
+      if (userToken && userChain) {
+        token = userToken.toLowerCase();
+        chain = userChain.toLowerCase();
+      } else {
+        const config = resolvePaymentConfig();
+        token = config.token;
+        chain = config.chain;
+      }
+      // Always enforce: 'credit' is only supported on ethereum-sepolia
+      if (token === 'credit' && chain !== 'ethereum-sepolia') {
+        return {
+          content: [
+            { type: "text", text: `'credit' is only supported on ethereum-sepolia` }
+          ]
+        };
+      }
+      if (!SUPPORTED_PAYMENT_METHODS.includes(token)) {
+        return {
+          content: [
+            { type: "text", text: `Unsupported payment method: ${token}` }
+          ]
+        };
+      }
+      if (!(chain in SUPPORTED_CHAINS)) {
+        return {
+          content: [
+            { type: "text", text: `Unsupported chain: ${chain}` }
+          ]
+        };
+      }
+      const supportedTokens = SUPPORTED_CHAINS[chain as SupportedChain];
+      if (!supportedTokens.includes(token as SupportedToken)) {
+        return {
+          content: [
+            { type: "text", text: `Token '${token}' is not supported on chain '${chain}'` }
+          ]
+        };
+      }
       const url = `${CROSSMINT_API_BASE}/v1-alpha2/wallets/${address}/balances?tokens=${token}&chains=${chain}`;
       const headers = { "X-API-KEY": process.env.CROSSMINT_API_KEY || "" };
       const response = await fetch(url, { headers });
@@ -466,11 +573,11 @@ server.tool(
       console.error('DEBUG: Raw balance API response:', JSON.stringify(data, null, 2));
       let balance: number | null = null;
       let decimals = 2;
-      const isCreditToken = token.toLowerCase() === 'credit';
+      const isCreditToken = token === 'credit';
       if (Array.isArray(data)) {
         const tokenInfo = data.find((t: any) =>
           (isCreditToken && t.token.toLowerCase() === 'credit') ||
-          (!isCreditToken && t.token.toLowerCase() === token.toLowerCase())
+          (!isCreditToken && t.token.toLowerCase() === token)
         );
         console.error('DEBUG: tokenInfo', tokenInfo);
         if (tokenInfo && tokenInfo.balances && tokenInfo.balances[chain]) {
@@ -488,7 +595,7 @@ server.tool(
       }
       return {
         content: [
-          { type: "text", text: `CREDIT balance for ${address}: ${balanceText}` }
+          { type: "text", text: `${token.toUpperCase()} balance for ${address}: ${balanceText}` }
         ]
       };
     } catch (error) {
