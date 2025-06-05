@@ -311,8 +311,8 @@ server.tool(
           status: 'failed',
           reason: 'Insufficient funds detected in order response'
         });
-        const totalAmount = orderResponse.quote?.totalPrice?.amount;
-        const currency = orderResponse.quote?.totalPrice?.currency;
+        const totalAmount = orderResponse.quote?.totalPrice;
+        const currency = orderResponse.quote?.currency;
         
         return {
           content: [
@@ -326,8 +326,8 @@ server.tool(
       }
 
       const orderId = orderResponse.order?.orderId;
-      const price = orderResponse.order?.quote?.totalAmount;
-      const currency = orderResponse.order?.quote?.currency;
+      const price = orderResponse.quote?.totalPrice;
+      const currency = orderResponse.quote?.currency;
       const serializedTransaction = orderResponse.order?.payment?.preparation?.serializedTransaction;
 
       logger.info('Order Creation Complete', {
